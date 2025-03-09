@@ -361,16 +361,10 @@ setup_open_ssh() {
 # Create and configure Mycelium service
 create_mycelium_service() {
     local node_type="$1"
-    local peers=("tcp://188.40.132.242:9651" "quic://185.69.166.8:9651" "quic://185.206.122.71:9651" 
-                "tcp://[2a04:f340:c0:71:28cc:b2ff:fe63:dd1c]:9651" "tcp://[2001:728:1000:402:78d3:cdff:fe63:e07e]:9651" 
-                "quic://[2a10:b600:1:0:ec4:7aff:fe30:8235]:9651")
-    
-    local peers_string=$(printf " %s" "${peers[@]}")
-    peers_string=${peers_string:1}  # Remove the leading space
     
     log "Creating Mycelium service for ${node_type} node..."
     
-    # Create the service file
+    # Create the service file using exactly your desired configuration
     cat << EOF | sudo tee /etc/systemd/system/mcluster.service > /dev/null
 [Unit]
 Description=End-2-end encrypted IPv6 overlay network
@@ -386,7 +380,7 @@ CapabilityBoundingSet=CAP_NET_ADMIN
 StateDirectory=mycelium
 StateDirectoryMode=0700
 ExecStartPre=+-/sbin/modprobe tun
-ExecStart=/usr/local/bin/mycelium --tun-name mycelium -k %S/mycelium/key.bin --peers ${peers_string}
+ExecStart=/usr/local/bin/mycelium --peers tcp://188.40.132.242:9651 quic://185.69.166.8:9651 --tun-name utun9
 Restart=always
 RestartSec=5
 TimeoutStopSec=5
