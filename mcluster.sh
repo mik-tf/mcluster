@@ -160,12 +160,219 @@ fetch_node_info_from_github() {
     echo "$content"
 }
 
+# Function to set up SSH keys for control node
+setup_control_ssh_keys() {
+    local ssh_dir="$HOME/.ssh"
+    
+    log "Setting up SSH keys for cluster control..."
+    
+    # Create SSH directory if it doesn't exist
+    mkdir -p "$ssh_dir"
+    chmod 700 "$ssh_dir"
+    
+    # Find all potential SSH key pairs in the .ssh directory
+    local key_files=()
+    local key_names=()
+    
+    # Check for common key types
+    for key_type in id_ed25519 id_rsa id_ecdsa id_dsa; do
+        if [[ -f "$ssh_dir/$key_type" && -f "$ssh_dir/$key_type.pub" ]]; then
+            key_files+=("$ssh_dir/$key_type")
+            key_names+=("$key_type")
+        fi
+    done
+    
+    # Present options to the user
+    if [[ ${#key_files[@]} -gt 0 ]]; then
+        echo "Found existing SSH keys:"
+        for i in "${!key_names[@]}"; do
+            echo "$((i+1)). ${key_names[$i]}"
+        done
+        echo "$((${#key_files[@]}+1)). Generate new SSH keys"
+        echo "$((${#key_files[@]}+2)). Use keys from another location"
+        
+        read -p "Enter your choice [1-$((${#key_files[@]}+2))]: " key_choice
+        
+        # Validate input
+        if [[ ! "$key_choice" =~ ^[0-9]+$ || "$key_choice" -lt 1 || "$key_choice" -gt $((${#key_files[@]}+2)) ]]; then
+            error "Invalid choice. Please enter a number between 1 and $((${#key_files[@]}+2))."
+        fi
+        
+        if [[ "$key_choice" -le ${#key_files[@]} ]]; then
+            # User chose an existing key
+            local selected_index=$((key_choice-1))
+            key_file="${key_files[$selected_index]}"
+            pub_key_file="${key_file}.pub"
+            log "Using existing SSH key: $key_file"
+        elif [[ "$key_choice" -eq $((${#key_files[@]}+1)) ]]; then
+            # Generate new keys
+            key_file="$ssh_dir/mcluster_id_ed25519"
+            pub_key_file="${key_file}.pub"
+            
+            log "Generating new SSH key pair..."
+            ssh-keygen -t ed25519 -N "" -f "$key_file" -C "mcluster_key"
+            
+            if [[ ! -f "$key_file" || ! -f "$pub_key_file" ]]; then
+                error "Failed to generate SSH key pair."
+            fi
+            
+            chmod 600 "$key_file"
+            chmod 644 "$pub_key_file"
+            log "New SSH key pair generated at $key_file"
+        else
+            # Import keys from another location
+            read -p "Enter path to private key file: " import_key_file
+            read -p "Enter path to public key file: " import_pub_key_file
+            
+            if [[ ! -f "$import_key_file" || ! -f "$import_pub_key_file" ]]; then
+                error "One or both key files not found. Please check the paths."
+            fi
+            
+            # Determine the key name from the file path
+            local key_basename=$(basename "$import_key_file")
+            key_file="$ssh_dir/mcluster_$key_basename"
+            pub_key_file="${key_file}.pub"
+            
+            cp "$import_key_file" "$key_file"
+            cp "$import_pub_key_file" "$pub_key_file"
+            
+            chmod 600 "$key_file"
+            chmod 644 "$pub_key_file"
+            log "SSH key pair imported to $key_file"
+        fi
+    else
+        # No existing keys found
+        echo "No SSH keys found in $ssh_dir"
+        echo "1. Generate new SSH keys"
+        echo "2. Import keys from another location"
+        
+        read -p "Enter your choice [1-2]: " key_choice
+        
+        case $key_choice in
+            1)
+                # Generate new keys
+                key_file="$ssh_dir/id_ed25519"
+                pub_key_file="${key_file}.pub"
+                
+                log "Generating new SSH key pair..."
+                ssh-keygen -t ed25519 -N "" -f "$key_file" -C "mcluster_key"
+                
+                if [[ ! -f "$key_file" || ! -f "$pub_key_file" ]]; then
+                    error "Failed to generate SSH key pair."
+                fi
+                
+                chmod 600 "$key_file"
+                chmod 644 "$pub_key_file"
+                log "SSH key pair generated at $key_file"
+                ;;
+            2)
+                # Import keys from another location
+                read -p "Enter path to private key file: " import_key_file
+                read -p "Enter path to public key file: " import_pub_key_file
+                
+                if [[ ! -f "$import_key_file" || ! -f "$import_pub_key_file" ]]; then
+                    error "One or both key files not found. Please check the paths."
+                fi
+                
+                # Determine the key name from the file path
+                local key_basename=$(basename "$import_key_file")
+                key_file="$ssh_dir/$key_basename"
+                pub_key_file="${key_file}.pub"
+                
+                cp "$import_key_file" "$key_file"
+                cp "$import_pub_key_file" "$pub_key_file"
+                
+                chmod 600 "$key_file"
+                chmod 644 "$pub_key_file"
+                log "SSH key pair imported to $key_file"
+                ;;
+            *)
+                error "Invalid choice. Please enter 1 or 2."
+                ;;
+        esac
+    fi
+    
+    # Add entry to SSH config to use this key for mycelium addresses
+    local ssh_config="$ssh_dir/config"
+    touch "$ssh_config"  # Create if doesn't exist
+    
+    if ! grep -q "# mcluster configuration" "$ssh_config" 2>/dev/null; then
+        log "Adding mycelium configuration to SSH config..."
+        cat >> "$ssh_config" << EOF
+
+# mcluster configuration
+Host fd00:*
+    IdentityFile $key_file
+    User $(whoami)
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    AddressFamily inet6
+EOF
+    else
+        # Update the IdentityFile line if configuration already exists
+        sed -i "s|IdentityFile .*|IdentityFile $key_file|" "$ssh_config"
+    fi
+    
+    # Read the public key content for later use
+    local pub_key_content=$(cat "$pub_key_file")
+    
+    log "SSH keys set up successfully."
+    echo "$pub_key_content" > /tmp/ssh_pubkey
+    return 0
+}
+
+# Function to set up authorized keys for managed nodes
+setup_authorized_keys() {
+    log "Setting up authorized keys for SSH access..."
+    
+    # Fetch node information from GitHub
+    local node_info=$(fetch_node_info_from_github)
+    
+    # Get control nodes with SSH keys
+    local control_nodes=$(echo "$node_info" | grep -v "^#" | grep "control" | grep -v "^$")
+    
+    if [[ -z "$control_nodes" ]]; then
+        warn "No control nodes with SSH keys found in the cluster. SSH access may not work."
+        return 1
+    fi
+    
+    local ssh_dir="$HOME/.ssh"
+    mkdir -p "$ssh_dir"
+    chmod 700 "$ssh_dir"
+    
+    local auth_keys="$ssh_dir/authorized_keys"
+    touch "$auth_keys"
+    chmod 600 "$auth_keys"
+    
+    # Process control nodes and add their SSH keys to authorized_keys
+    while read -r line; do
+        # Format is: node_name mycelium_address public_key node_type ssh_pubkey
+        # We need the 5th field (ssh_pubkey)
+        local name=$(echo "$line" | awk '{print $1}')
+        local ssh_key=$(echo "$line" | awk '{$1=$2=$3=$4=""; print $0}' | sed 's/^[ \t]*//')
+        
+        # Check if this looks like an SSH key (starts with ssh-)
+        if [[ "$ssh_key" == ssh-* ]]; then
+            log "Adding SSH key from control node $name"
+            
+            # Only add the key if it's not already in the file
+            if ! grep -q "$ssh_key" "$auth_keys"; then
+                echo "# mcluster: $name" >> "$auth_keys"
+                echo "$ssh_key" >> "$auth_keys"
+            fi
+        fi
+    done <<< "$control_nodes"
+    
+    log "Authorized keys set up successfully."
+}
+
 # Function to update node information on GitHub
 update_node_info_on_github() {
     local node_name="$1"
     local mycelium_address="$2"
     local public_key="$3"
-    local node_type="$4"  # Add node type parameter
+    local node_type="$4"
+    local ssh_pubkey="$5"  # Optional SSH public key
 
     setup_github_config
     
@@ -179,7 +386,12 @@ update_node_info_on_github() {
         current_content=$(echo "$current_content" | grep -v "^$node_name ")
     fi
     
-    local new_content="$current_content"$'\n'"$node_name $mycelium_address $public_key $node_type"
+    local new_entry="$node_name $mycelium_address $public_key $node_type"
+    if [[ -n "$ssh_pubkey" ]]; then
+        new_entry="$new_entry $ssh_pubkey"
+    fi
+    
+    local new_content="$current_content"$'\n'"$new_entry"
     
     # Remove any blank lines
     new_content=$(echo "$new_content" | grep -v "^$")
@@ -233,7 +445,7 @@ list_nodes() {
     echo -e "${BLUE}------------------------------------------------------------------${NC}"
     
     # Process and display each line of node information
-    echo "$node_info" | while IFS=' ' read -r name address publickey type; do
+    echo "$node_info" | while IFS=' ' read -r name address publickey type rest; do
         # Skip lines that start with # (comments) or empty lines
         if [[ -z "$name" || "$name" == \#* ]]; then
             continue
@@ -481,18 +693,37 @@ setup_node() {
     # Authenticate with GitHub and set up repository
     setup_github_config
 
+    # For control nodes, set up SSH keys
+    local ssh_pubkey=""
+    if [[ "$node_type" == "control" ]]; then
+        setup_control_ssh_keys
+        if [[ -f /tmp/ssh_pubkey ]]; then
+            ssh_pubkey=$(cat /tmp/ssh_pubkey)
+        fi
+    fi
+
     # Install Mycelium
     install_mycelium
 
     # Create and start Mycelium service
     create_mycelium_service "$node_type"
 
+    # For managed nodes, set up SSH server and authorized keys
+    if [[ "$node_type" == "managed" ]]; then
+        setup_open_ssh
+        setup_authorized_keys
+    fi
+
     if [[ -f /tmp/mycelium_address ]]; then
         local address=$(cat /tmp/mycelium_address)
         local pubkey=$(cat /tmp/mycelium_pubkey)
 
         # Share this node's information with the cluster via GitHub
-        update_node_info_on_github "$node_name" "$address" "$pubkey" "$node_type"
+        if [[ -n "$ssh_pubkey" ]]; then
+            update_node_info_on_github "$node_name" "$address" "$pubkey" "$node_type" "$ssh_pubkey"
+        else
+            update_node_info_on_github "$node_name" "$address" "$pubkey" "$node_type"
+        fi
 
         # Fetch and display information about other nodes in the cluster
         log "Fetching information about other nodes in the cluster..."
@@ -552,52 +783,46 @@ case "$1" in
         echo "This tool sets up Mycelium networking between nodes."
         echo "Run this script on each managed node, then run it on the control node."
         echo
-
+        
+        # Main menu loop
         while true; do
             echo "What would you like to do?"
-            echo "1. Set a control node"
-            echo "2. Set a managed node with SSH"
-            echo "3. Set a managed node with public key"
-            echo "4. Set a managed node with public key and passwordless sudo"
-            echo "5. List all nodes in the cluster"
-            echo "6. Exit"
-            read -p "Please enter your choice [1-6]: " choice
+            echo "1. Set a control node (used to manage other nodes)"
+            echo "2. Set a managed node (will be accessed by control node)"
+            echo "3. Set a managed node with passwordless sudo"
+            echo "4. List all nodes in the cluster"
+            echo "5. Exit"
+            read -p "Please enter your choice [1-5]: " choice
 
             case $choice in
                 1)
                     read -p "Enter a name for this control node: " node_name
                     setup_node "control" "" "$node_name"
                     log "Setup for control node for $DISPLAY_NAME is complete. Exiting..."
-                    break
+                    exit 0
                     ;;
                 2)
                     read -p "Enter a name for this managed node: " node_name
                     setup_node "managed" "" "$node_name"
                     log "Setup for managed node for $DISPLAY_NAME is complete. Exiting..."
-                    break
+                    exit 0
                     ;;
                 3)
                     read -p "Enter a name for this managed node: " node_name
                     setup_node "managed" "" "$node_name"
-                    log "Setup for managed node with public key for $DISPLAY_NAME is complete. Exiting..."
-                    break
+                    configure_passwordless_sudo
+                    log "Setup for managed node with passwordless sudo for $DISPLAY_NAME is complete. Exiting..."
+                    exit 0
                     ;;
                 4)
-                    read -p "Enter a name for this managed node: " node_name
-                    setup_node "managed" "" "$node_name"
-                    configure_passwordless_sudo
-                    log "Setup for managed node with public key and passwordless sudo for $DISPLAY_NAME is complete. Exiting..."
-                    break
-                    ;;
-                5)
                     list_nodes
                     ;;
-                6)
+                5)
                     log "Exiting..."
-                    break
+                    exit 0
                     ;;
                 *)
-                    warn "Invalid choice. Please enter a number between 1 and 6."
+                    warn "Invalid choice. Please enter a number between 1 and 5."
                     ;;
             esac
         done
