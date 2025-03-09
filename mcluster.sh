@@ -190,12 +190,13 @@ setup_control_ssh_keys() {
         done
         echo "$((${#key_files[@]}+1)). Generate new SSH keys"
         echo "$((${#key_files[@]}+2)). Use keys from another location"
+        echo "$((${#key_files[@]}+3)). Paste private and public key"
         
-        read -p "Enter your choice [1-$((${#key_files[@]}+2))]: " key_choice
+        read -p "Enter your choice [1-$((${#key_files[@]}+3))]: " key_choice
         
         # Validate input
-        if [[ ! "$key_choice" =~ ^[0-9]+$ || "$key_choice" -lt 1 || "$key_choice" -gt $((${#key_files[@]}+2)) ]]; then
-            error "Invalid choice. Please enter a number between 1 and $((${#key_files[@]}+2))."
+        if [[ ! "$key_choice" =~ ^[0-9]+$ || "$key_choice" -lt 1 || "$key_choice" -gt $((${#key_files[@]}+3)) ]]; then
+            error "Invalid choice. Please enter a number between 1 and $((${#key_files[@]}+3))."
         fi
         
         if [[ "$key_choice" -le ${#key_files[@]} ]]; then
@@ -219,7 +220,7 @@ setup_control_ssh_keys() {
             chmod 600 "$key_file"
             chmod 644 "$pub_key_file"
             log "New SSH key pair generated at $key_file"
-        else
+        elif [[ "$key_choice" -eq $((${#key_files[@]}+2)) ]]; then
             # Import keys from another location
             read -p "Enter path to private key file: " import_key_file
             read -p "Enter path to public key file: " import_pub_key_file
@@ -239,14 +240,33 @@ setup_control_ssh_keys() {
             chmod 600 "$key_file"
             chmod 644 "$pub_key_file"
             log "SSH key pair imported to $key_file"
+        else
+            # Paste keys
+            key_file="$ssh_dir/id_ed25519"
+            pub_key_file="${key_file}.pub"
+            
+            echo "Paste your private key content (Ctrl+D when done):"
+            private_key_content=$(cat)
+            
+            echo "Paste your public key content (Ctrl+D when done):"
+            public_key_content=$(cat)
+            
+            # Write the key content to files
+            echo "$private_key_content" > "$key_file"
+            echo "$public_key_content" > "$pub_key_file"
+            
+            chmod 600 "$key_file"
+            chmod 644 "$pub_key_file"
+            log "SSH key pair saved at $key_file"
         fi
     else
         # No existing keys found
         echo "No SSH keys found in $ssh_dir"
         echo "1. Generate new SSH keys"
         echo "2. Import keys from another location"
+        echo "3. Paste private and public key"
         
-        read -p "Enter your choice [1-2]: " key_choice
+        read -p "Enter your choice [1-3]: " key_choice
         
         case $key_choice in
             1)
@@ -286,8 +306,27 @@ setup_control_ssh_keys() {
                 chmod 644 "$pub_key_file"
                 log "SSH key pair imported to $key_file"
                 ;;
+            3)
+                # Paste keys
+                key_file="$ssh_dir/id_ed25519"
+                pub_key_file="${key_file}.pub"
+                
+                echo "Paste your private key content (Ctrl+D when done):"
+                private_key_content=$(cat)
+                
+                echo "Paste your public key content (Ctrl+D when done):"
+                public_key_content=$(cat)
+                
+                # Write the key content to files
+                echo "$private_key_content" > "$key_file"
+                echo "$public_key_content" > "$pub_key_file"
+                
+                chmod 600 "$key_file"
+                chmod 644 "$pub_key_file"
+                log "SSH key pair saved at $key_file"
+                ;;
             *)
-                error "Invalid choice. Please enter 1 or 2."
+                error "Invalid choice. Please enter 1, 2, or 3."
                 ;;
         esac
     fi
