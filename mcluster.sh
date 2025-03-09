@@ -52,6 +52,207 @@ uninstall() {
   fi
 }
 
+# Install GitHub CLI if not already installed
+install_gh_cli() {
+    if ! command -v gh &> /dev/null; then
+        log "Installing GitHub CLI..."
+        if ! sudo apt update || ! sudo apt install -y gh; then
+            error "Failed to install GitHub CLI. Please install it manually: https://cli.github.com/"
+        fi
+    fi
+}
+
+# Authenticate with GitHub via browser
+authenticate_with_github() {
+    log "Authenticating with GitHub..."
+    if ! gh auth login --hostname github.com --web; then
+        error "Failed to authenticate with GitHub. Please try again."
+    fi
+    log "GitHub authentication successful."
+}
+
+# GitHub API configuration - these will be set by setup_github_config
+GITHUB_REPO_OWNER=""
+GITHUB_REPO_NAME=""
+GITHUB_API_URL=""
+
+# Function to set up GitHub repository configuration
+setup_github_config() {
+    # Config file location
+    local config_dir="$HOME/.config/mcluster"
+    local config_file="$config_dir/config"
+    
+    # Check if configuration already exists
+    if [[ -f "$config_file" ]]; then
+        # Load existing configuration
+        source "$config_file"
+        log "Loaded existing GitHub configuration."
+        return 0
+    fi
+    
+    # Ensure GitHub CLI is installed
+    install_gh_cli
+    
+    # Ensure the user is authenticated with GitHub
+    if ! gh auth status &>/dev/null; then
+        authenticate_with_github
+    fi
+    
+    # Ask for GitHub username if not already provided
+    if [[ -z "$GITHUB_REPO_OWNER" ]]; then
+        # Try to get the username from GitHub CLI
+        local default_username=$(gh api user --jq '.login' 2>/dev/null)
+        read -p "Enter your GitHub username [$default_username]: " input_username
+        GITHUB_REPO_OWNER=${input_username:-$default_username}
+        
+        if [[ -z "$GITHUB_REPO_OWNER" ]]; then
+            error "GitHub username is required."
+        fi
+    fi
+    
+    # Set repository name based on username
+    GITHUB_REPO_NAME="mcluster_${GITHUB_REPO_OWNER}"
+    GITHUB_API_URL="https://api.github.com/repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/contents/node_info.txt"
+    
+    # Check if the repository exists
+    if ! gh repo view "$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME" &>/dev/null; then
+        log "Repository $GITHUB_REPO_NAME does not exist. Creating it..."
+        
+        # Create a private repository
+        if ! gh repo create "$GITHUB_REPO_NAME" --private --description "Mycelium Cluster Node Registry" --confirm; then
+            error "Failed to create repository. Please check your GitHub access."
+        fi
+        
+        # Initialize node_info.txt with a header
+        echo "# Mycelium Cluster Node Registry" | gh api -X PUT "repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/contents/node_info.txt" \
+            -f message="Initialize node registry" \
+            -f content="$(echo "# Mycelium Cluster Node Registry" | base64)"
+        
+        log "Created private repository: $GITHUB_REPO_OWNER/$GITHUB_REPO_NAME"
+    else
+        log "Using existing repository: $GITHUB_REPO_OWNER/$GITHUB_REPO_NAME"
+    fi
+    
+    # Save configuration
+    mkdir -p "$config_dir"
+    cat > "$config_file" << EOF
+GITHUB_REPO_OWNER="$GITHUB_REPO_OWNER"
+GITHUB_REPO_NAME="$GITHUB_REPO_NAME"
+GITHUB_API_URL="$GITHUB_API_URL"
+EOF
+    
+    log "GitHub configuration saved."
+}
+
+# Function to fetch node information from GitHub
+fetch_node_info_from_github() {
+    setup_github_config
+    
+    log "Fetching node information from GitHub..."
+    local response=$(gh api "repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/contents/node_info.txt" 2>/dev/null)
+    
+    if [[ -z "$response" ]]; then
+        warn "Failed to fetch node information from GitHub."
+        return 1
+    fi
+    
+    local content=$(echo "$response" | jq -r '.content' | base64 --decode)
+    echo "$content"
+}
+
+# Function to update node information on GitHub
+update_node_info_on_github() {
+    local node_name="$1"
+    local mycelium_address="$2"
+    local public_key="$3"
+    local node_type="$4"  # Add node type parameter
+
+    setup_github_config
+    
+    log "Updating node information on GitHub..."
+    local current_content=$(fetch_node_info_from_github)
+    
+    # Check if this node already exists in the file
+    if echo "$current_content" | grep -q "^$node_name "; then
+        log "Node $node_name already exists in registry. Updating information..."
+        # Remove the existing entry
+        current_content=$(echo "$current_content" | grep -v "^$node_name ")
+    fi
+    
+    local new_content="$current_content"$'\n'"$node_name $mycelium_address $public_key $node_type"
+    
+    # Remove any blank lines
+    new_content=$(echo "$new_content" | grep -v "^$")
+
+    # Get the current file's SHA
+    local sha=$(gh api "repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/contents/node_info.txt" --jq '.sha')
+    
+    if [[ -z "$sha" ]]; then
+        error "Failed to get SHA for node_info.txt. Ensure the file exists and you have access to it."
+    fi
+    
+    # Update the file with the new content
+    local encoded_content=$(echo "$new_content" | base64 -w 0)
+    local payload=$(jq -n \
+        --arg message "Update node $node_name" \
+        --arg content "$encoded_content" \
+        --arg sha "$sha" \
+        '{message: $message, content: $content, sha: $sha}')
+
+    if ! gh api -X PUT "repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/contents/node_info.txt" --input - <<< "$payload" > /dev/null; then
+        error "Failed to update node information on GitHub."
+    fi
+
+    log "Node information updated on GitHub."
+}
+
+# Function to list all nodes in the cluster
+list_nodes() {
+    log "Fetching cluster node information..."
+    
+    # Try to fetch the node info from GitHub
+    if ! command -v gh &> /dev/null; then
+        install_gh_cli
+    fi
+    
+    # Set up GitHub configuration
+    setup_github_config
+    
+    # Fetch node information
+    local node_info=$(fetch_node_info_from_github)
+    
+    if [[ -z "$node_info" ]]; then
+        warn "No node information found or unable to fetch data."
+        return 1
+    fi
+    
+    # Display header
+    echo
+    echo -e "${BLUE}========== MYCELIUM CLUSTER NODES ==========${NC}"
+    echo -e "${BLUE}Node Name          Mycelium Address                              Type${NC}"
+    echo -e "${BLUE}------------------------------------------------------------------${NC}"
+    
+    # Process and display each line of node information
+    echo "$node_info" | while IFS=' ' read -r name address publickey type; do
+        # Skip lines that start with # (comments) or empty lines
+        if [[ -z "$name" || "$name" == \#* ]]; then
+            continue
+        fi
+        
+        # If type isn't specified, try to determine it
+        if [[ -z "$type" ]]; then
+            # Default to "managed" if unknown
+            type="managed"
+        fi
+        
+        # Format the output
+        printf "%-18s %-42s %-10s\n" "$name" "$address" "$type"
+    done
+    
+    echo
+    log "To connect to a managed node, use: ssh username@<Mycelium-Address>"
+}
+
 # Function to install Mycelium
 install_mycelium() {
     log "Updating package list..."
@@ -60,7 +261,7 @@ install_mycelium() {
     fi
 
     log "Installing dependencies..."
-    if ! sudo apt install -y curl tar; then
+    if ! sudo apt install -y curl tar jq; then
         error "Failed to install dependencies. Ensure you have sudo privileges."
     fi
 
@@ -170,7 +371,7 @@ create_mycelium_service() {
     log "Creating Mycelium service for ${node_type} node..."
     
     # Create the service file
-    cat << EOF | sudo tee /etc/systemd/system/mycelium.service > /dev/null
+    cat << EOF | sudo tee /etc/systemd/system/mcluster.service > /dev/null
 [Unit]
 Description=End-2-end encrypted IPv6 overlay network
 Wants=network.target
@@ -200,11 +401,11 @@ EOF
         error "Failed to reload systemd daemon. Ensure you have sudo privileges."
     fi
     
-    if ! sudo systemctl enable mycelium; then
+    if ! sudo systemctl enable mcluster; then
         error "Failed to enable Mycelium service. Ensure you have sudo privileges."
     fi
     
-    if ! sudo systemctl start mycelium; then
+    if ! sudo systemctl start mcluster; then
         error "Failed to start Mycelium service. Ensure you have sudo privileges."
     fi
     
@@ -249,54 +450,37 @@ EOF
 setup_node() {
     local node_type="$1"
     local git_user="$2"
+    local node_name="$3"
 
     log "Setting up a ${node_type} node..."
-    
-    # If a GitHub user is provided, set up public key authentication
-    if [[ -n "$git_user" ]]; then
-        local ssh_dir="$HOME/.ssh"
-        local authorized_keys_file="$ssh_dir/authorized_keys"
 
-        log "Setting up managed node with public key from GitHub user $git_user..."
+    # Install GitHub CLI if not already installed
+    install_gh_cli
 
-        # Create .ssh directory if it doesn't exist
-        if [[ ! -d "$ssh_dir" ]]; then
-            log "Creating .ssh directory..."
-            mkdir -p "$ssh_dir"
-            chmod 700 "$ssh_dir"
-        fi
-
-        # Set up OpenSSH server and disable password authentication
-        setup_open_ssh
-
-        # Fetch public keys from GitHub
-        log "Fetching public keys from GitHub..."
-        if ! curl -s "https://github.com/$git_user.keys" -o /tmp/github_keys; then
-            error "Failed to fetch public keys from GitHub. Check the GitHub username and your internet connection."
-        fi
-
-        # Append keys to authorized_keys file
-        log "Appending public keys to authorized_keys..."
-        cat /tmp/github_keys >> "$authorized_keys_file"
-        chmod 600 "$authorized_keys_file"
-
-        log "Public keys from GitHub user $git_user have been added to $authorized_keys_file."
-    fi
+    # Authenticate with GitHub and set up repository
+    setup_github_config
 
     # Install Mycelium
     install_mycelium
-    
+
     # Create and start Mycelium service
     create_mycelium_service "$node_type"
-    
+
     if [[ -f /tmp/mycelium_address ]]; then
         local address=$(cat /tmp/mycelium_address)
         local pubkey=$(cat /tmp/mycelium_pubkey)
-        
+
+        # Share this node's information with the cluster via GitHub
+        update_node_info_on_github "$node_name" "$address" "$pubkey" "$node_type"
+
+        # Fetch and display information about other nodes in the cluster
+        log "Fetching information about other nodes in the cluster..."
+        list_nodes
+
         log "${node_type^} node setup complete."
         log "You can connect to this node using the following Mycelium address: ${address}"
         log "Public Key: ${pubkey}"
-        
+
         if [[ "$node_type" == "control" ]]; then
             log "This is a control node. You can SSH into your managed nodes using:"
             log "  ssh username@<managed-node-mycelium-address>"
@@ -336,6 +520,9 @@ case "$1" in
     uninstall)
         uninstall
         ;;
+    list)
+        list_nodes
+        ;;
     *)
         # Interactive menu
         echo
@@ -351,43 +538,45 @@ case "$1" in
             echo "2. Set a managed node with SSH"
             echo "3. Set a managed node with public key"
             echo "4. Set a managed node with public key and passwordless sudo"
-            echo "5. Exit"
-            read -p "Please enter your choice [1-5]: " choice
+            echo "5. List all nodes in the cluster"
+            echo "6. Exit"
+            read -p "Please enter your choice [1-6]: " choice
 
             case $choice in
                 1)
-                    install_mycelium
-                    setup_node "control"
+                    read -p "Enter a name for this control node: " node_name
+                    setup_node "control" "" "$node_name"
                     log "Setup for control node for $DISPLAY_NAME is complete. Exiting..."
                     break
                     ;;
                 2)
-                    install_mycelium
-                    setup_node "managed"
+                    read -p "Enter a name for this managed node: " node_name
+                    setup_node "managed" "" "$node_name"
                     log "Setup for managed node for $DISPLAY_NAME is complete. Exiting..."
                     break
                     ;;
                 3)
-                    read -p "Enter the GitHub username: " git_user
-                    install_mycelium
-                    setup_node "managed" "$git_user"
+                    read -p "Enter a name for this managed node: " node_name
+                    setup_node "managed" "" "$node_name"
                     log "Setup for managed node with public key for $DISPLAY_NAME is complete. Exiting..."
                     break
                     ;;
                 4)
-                    read -p "Enter the GitHub username: " git_user
-                    install_mycelium
-                    setup_node "managed" "$git_user"
+                    read -p "Enter a name for this managed node: " node_name
+                    setup_node "managed" "" "$node_name"
                     configure_passwordless_sudo
                     log "Setup for managed node with public key and passwordless sudo for $DISPLAY_NAME is complete. Exiting..."
                     break
                     ;;
                 5)
+                    list_nodes
+                    ;;
+                6)
                     log "Exiting..."
                     break
                     ;;
                 *)
-                    warn "Invalid choice. Please enter a number between 1 and 5."
+                    warn "Invalid choice. Please enter a number between 1 and 6."
                     ;;
             esac
         done
