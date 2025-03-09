@@ -409,13 +409,23 @@ EOF
     
     local attempts=0
     local max_attempts=12
-    local mycelium_info=""
+    local mycelium_address=""
+    local public_key="unknown"
     
     while [[ $attempts -lt $max_attempts ]]; do
-        mycelium_info=$(mycelium inspect --json 2>/dev/null)
-        if [[ -n "$mycelium_info" && "$mycelium_info" == *"address"* ]]; then
+        # Try method 1: using ip command
+        mycelium_address=$(ip -6 addr show utun9 2>/dev/null | grep -oP '(?<=inet6\s)[a-f0-9:]+(?=\/128)' | head -n 1)
+        
+        # If method 1 fails, try method 2: using ifconfig
+        if [[ -z "$mycelium_address" ]]; then
+            mycelium_address=$(ifconfig utun9 2>/dev/null | grep -Eo 'inet6 [a-f0-9:]+' | grep -v 'fe80' | head -n 1 | awk '{print $2}')
+        fi
+        
+        if [[ -n "$mycelium_address" ]]; then
+            log "Found Mycelium address: $mycelium_address"
             break
         fi
+        
         log "Waiting for Mycelium to initialize (attempt $((attempts+1))/$max_attempts)..."
         sleep 5
         attempts=$((attempts+1))
@@ -426,9 +436,25 @@ EOF
         return 1
     fi
     
-    # Extract and display the Mycelium address
-    local mycelium_address=$(echo "$mycelium_info" | grep -o '"address": "[^"]*' | sed 's/"address": "//')
-    local public_key=$(echo "$mycelium_info" | grep -o '"publicKey": "[^"]*' | sed 's/"publicKey": "//')
+    # Try to get the public key using mycelium inspect if possible
+    # First find the key file location
+    local key_locations=(
+        "/var/lib/mycelium/priv_key.bin"
+        "/etc/mycelium/priv_key.bin"
+        "$HOME/.mycelium/priv_key.bin"
+        "/run/mycelium/priv_key.bin"
+    )
+    
+    for key_file in "${key_locations[@]}"; do
+        if sudo test -f "$key_file" 2>/dev/null; then
+            log "Found key file at $key_file, attempting to extract public key..."
+            pk_output=$(sudo mycelium inspect --json "$key_file" 2>/dev/null)
+            if [[ -n "$pk_output" && "$pk_output" == *"publicKey"* ]]; then
+                public_key=$(echo "$pk_output" | grep -o '"publicKey": "[^"]*' | sed 's/"publicKey": "//')
+                break
+            fi
+        fi
+    done
     
     log "Mycelium service is running successfully."
     log "Mycelium Address: ${mycelium_address}"
