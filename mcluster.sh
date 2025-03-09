@@ -413,14 +413,15 @@ EOF
     local public_key="unknown"
     
     while [[ $attempts -lt $max_attempts ]]; do
-        # Try method 1: using ip command
-        mycelium_address=$(ip -6 addr show utun9 2>/dev/null | grep -oP '(?<=inet6\s)[a-f0-9:]+(?=\/128)' | head -n 1)
+        # Attempt to get the global IPv6 address using ip command
+        mycelium_address=$(ip -6 addr show utun9 2>/dev/null | grep -v 'fe80::' | grep 'scope global' | grep -oP '([a-f0-9:]+)(?=\/)')
         
-        # If method 1 fails, try method 2: using ifconfig
+        # If that fails, try with ifconfig
         if [[ -z "$mycelium_address" ]]; then
-            mycelium_address=$(ifconfig utun9 2>/dev/null | grep -Eo 'inet6 [a-f0-9:]+' | grep -v 'fe80' | head -n 1 | awk '{print $2}')
+            mycelium_address=$(ifconfig utun9 2>/dev/null | grep 'inet6' | grep -v 'fe80' | awk '{print $2}')
         fi
         
+        # If we found an address, break the loop
         if [[ -n "$mycelium_address" ]]; then
             log "Found Mycelium address: $mycelium_address"
             break
