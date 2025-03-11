@@ -642,6 +642,66 @@ setup_open_ssh() {
     log "Password authentication has been disabled. Only public key authentication is allowed."
 }
 
+check_existing_node() {
+    # Check if the Mycelium service is already running
+    if sudo systemctl is-active --quiet mcluster.service; then
+        # Service exists and is active
+        local node_type=""
+        
+        # Try to determine if it's a control or managed node
+        if [[ -f /tmp/mycelium_address ]]; then
+            local address=$(cat /tmp/mycelium_address)
+            
+            # Fetch node info from GitHub
+            local node_info=$(fetch_node_info_from_github)
+            
+            # Look for this address in the node info
+            local node_entry=$(echo "$node_info" | grep "$address")
+            
+            if [[ -n "$node_entry" ]]; then
+                node_type=$(echo "$node_entry" | awk '{print $4}')
+            fi
+        fi
+        
+        # If we couldn't determine the node type, check for SSH keys setup
+        if [[ -z "$node_type" ]]; then
+            if grep -q "# mcluster configuration" "$HOME/.ssh/config" 2>/dev/null; then
+                node_type="control"
+            else
+                node_type="managed"
+            fi
+        fi
+        
+        log "This machine appears to be already configured as a ${node_type} node."
+        read -p "Do you want to reconfigure it? This may disrupt existing connections. [y/N]: " confirm
+        
+        if [[ "${confirm,,}" != "y" ]]; then
+            log "Operation cancelled. Existing node configuration preserved."
+            exit 0
+        fi
+        
+        log "Proceeding with reconfiguration..."
+        return 0
+    fi
+    
+    # Check for SSH config which would indicate a control node
+    if grep -q "# mcluster configuration" "$HOME/.ssh/config" 2>/dev/null && [[ ! -f "/tmp/is_reconfiguring" ]]; then
+        log "This machine appears to have SSH configuration for a control node."
+        read -p "Do you want to reconfigure it? [y/N]: " confirm
+        
+        if [[ "${confirm,,}" != "y" ]]; then
+            log "Operation cancelled."
+            exit 0
+        fi
+        
+        # Create a temporary marker to avoid repeated prompts
+        touch "/tmp/is_reconfiguring"
+        log "Proceeding with reconfiguration..."
+    fi
+    
+    return 0
+}
+
 # Create and configure Mycelium service
 create_mycelium_service() {
     local node_type="$1"
@@ -772,6 +832,8 @@ setup_node() {
             ssh_pubkey=$(cat /tmp/ssh_pubkey)
         fi
     fi
+
+    check_existing_node
 
     # Install Mycelium
     install_mycelium
