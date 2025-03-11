@@ -160,6 +160,51 @@ fetch_node_info_from_github() {
     echo "$content"
 }
 
+# Function to remove a specific node from GitHub registry
+remove_node_from_github() {
+    local node_name="$1"
+    
+    if [[ -z "$node_name" ]]; then
+        error "Node name is required. Usage: $SCRIPT_NAME remove-node <node_name>"
+    fi
+    
+    setup_github_config
+    
+    log "Removing node '$node_name' from registry..."
+    
+    # Fetch current node information
+    local current_content=$(fetch_node_info_from_github)
+    
+    # Check if this node exists in the file
+    if ! echo "$current_content" | grep -q "^$node_name "; then
+        error "Node '$node_name' not found in registry."
+    fi
+    
+    # Remove the specific node entry
+    local new_content=$(echo "$current_content" | grep -v "^$node_name ")
+    
+    # Get the current file's SHA
+    local sha=$(gh api "repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/contents/node_info.txt" --jq '.sha')
+    
+    if [[ -z "$sha" ]]; then
+        error "Failed to get SHA for node_info.txt. Ensure the file exists and you have access to it."
+    fi
+    
+    # Update the file with the new content
+    local encoded_content=$(echo "$new_content" | base64 -w 0)
+    local payload=$(jq -n \
+        --arg message "Remove node $node_name" \
+        --arg content "$encoded_content" \
+        --arg sha "$sha" \
+        '{message: $message, content: $content, sha: $sha}')
+
+    if ! gh api -X PUT "repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/contents/node_info.txt" --input - <<< "$payload" > /dev/null; then
+        error "Failed to update node registry on GitHub."
+    fi
+
+    log "Node '$node_name' has been removed from the registry."
+}
+
 # Function to reset the node information file on GitHub
 delete_node_info_from_github() {
     setup_github_config
@@ -916,6 +961,9 @@ case "$1" in
             log "Operation cancelled."
         fi
         ;;
+    remove-node)
+        remove_node_from_github "$2"
+        ;;
     *)
         # Interactive menu
         echo
@@ -933,8 +981,9 @@ case "$1" in
             echo "3. Set a managed node with passwordless sudo"
             echo "4. List all nodes in the cluster"
             echo "5. Delete node registry"
-            echo "6. Exit"
-            read -p "Please enter your choice [1-6]: " choice
+            echo "6. Remove a specific node"
+            echo "7. Exit"
+            read -p "Please enter your choice [1-7]: " choice
 
             case $choice in
                 1)
@@ -967,14 +1016,22 @@ case "$1" in
                             log "Operation cancelled."
                         fi
                         ;;
-                    6)
-                        log "Exiting..."
-                        exit 0
-                        ;;
-                    *)
-                        warn "Invalid choice. Please enter a number between 1 and 6."
-                        ;;
-                esac
+                6)
+                    read -p "Enter the name of the node to remove: " node_name
+                    if [[ -n "$node_name" ]]; then
+                        remove_node_from_github "$node_name"
+                    else
+                        warn "Node name cannot be empty."
+                    fi
+                    ;;
+                7)
+                    log "Exiting..."
+                    exit 0
+                    ;;
+                *)
+                    warn "Invalid choice. Please enter a number between 1 and 7."
+                    ;;
+            esac
         done
         ;;
 esac
