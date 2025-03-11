@@ -160,6 +160,39 @@ fetch_node_info_from_github() {
     echo "$content"
 }
 
+# Function to reset the node information file on GitHub
+delete_node_info_from_github() {
+    setup_github_config
+    
+    log "Resetting node registry to initial state..."
+    
+    # Get the current file's SHA and content
+    local response=$(gh api "repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/contents/node_info.txt" 2>/dev/null)
+    
+    if [[ -z "$response" ]]; then
+        error "Failed to access node_info.txt. Ensure the file exists and you have access to it."
+    fi
+    
+    local sha=$(echo "$response" | jq -r '.sha')
+    
+    # Keep only the first line (header) and reset the file
+    local new_content="# Mycelium Cluster Node Registry"
+    local encoded_content=$(echo "$new_content" | base64 -w 0)
+    
+    # Update the file with just the header line
+    local payload=$(jq -n \
+        --arg message "Reset node registry to initial state" \
+        --arg content "$encoded_content" \
+        --arg sha "$sha" \
+        '{message: $message, content: $content, sha: $sha}')
+
+    if ! gh api -X PUT "repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/contents/node_info.txt" --input - <<< "$payload" > /dev/null; then
+        error "Failed to reset node registry on GitHub."
+    fi
+    
+    log "Node registry has been reset to initial state. All node information has been removed."
+}
+
 # Function to set up SSH keys for control node
 setup_control_ssh_keys() {
     local ssh_dir="$HOME/.ssh"
@@ -615,7 +648,6 @@ create_mycelium_service() {
     
     log "Creating Mycelium service for ${node_type} node..."
     
-    # Create the service file using exactly your desired configuration
     cat << EOF | sudo tee /etc/systemd/system/mcluster.service > /dev/null
 [Unit]
 Description=End-2-end encrypted IPv6 overlay network
@@ -814,6 +846,14 @@ case "$1" in
     list)
         list_nodes
         ;;
+    delete-list)
+        read -p "Are you sure you want to delete the node registry? This will remove all node information. Type 'yes' to confirm: " confirm
+        if [[ "$confirm" == "yes" ]]; then
+            delete_node_info_from_github
+        else
+            log "Operation cancelled."
+        fi
+        ;;
     *)
         # Interactive menu
         echo
@@ -830,8 +870,9 @@ case "$1" in
             echo "2. Set a managed node (will be accessed by control node)"
             echo "3. Set a managed node with passwordless sudo"
             echo "4. List all nodes in the cluster"
-            echo "5. Exit"
-            read -p "Please enter your choice [1-5]: " choice
+            echo "5. Delete node registry"
+            echo "6. Exit"
+            read -p "Please enter your choice [1-6]: " choice
 
             case $choice in
                 1)
@@ -857,13 +898,21 @@ case "$1" in
                     list_nodes
                     ;;
                 5)
-                    log "Exiting..."
-                    exit 0
-                    ;;
-                *)
-                    warn "Invalid choice. Please enter a number between 1 and 5."
-                    ;;
-            esac
+                        read -p "Are you sure you want to delete the node registry? This will remove all node information. Type 'yes' to confirm: " confirm
+                        if [[ "$confirm" == "yes" ]]; then
+                            delete_node_info_from_github
+                        else
+                            log "Operation cancelled."
+                        fi
+                        ;;
+                    6)
+                        log "Exiting..."
+                        exit 0
+                        ;;
+                    *)
+                        warn "Invalid choice. Please enter a number between 1 and 6."
+                        ;;
+                esac
         done
         ;;
 esac
